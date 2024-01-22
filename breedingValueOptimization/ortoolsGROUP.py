@@ -1,105 +1,113 @@
 import numpy as np
 import pandas as pd
-import geatpy as ea
 import time
+from ortools.linear_solver import pywraplp
 
-to=time.time()
-ebv=np.array(pd.read_csv('/home/kingargroo/geneticalgroithm/EBV.csv'))
+ebv = np.array(pd.read_csv('/home/kingargroo/geneticalgroithm/GP22L.csv'))
 group_num=ebv[:,1]
-unique_group=np.unique(group_num)
-sample_num=ebv.shape[0]
-ebv=ebv[:,2]
-rel_mat=np.array(pd.read_csv('/home/kingargroo/geneticalgroithm/REL.csv'))
-rel_mat=rel_mat[:,1::]
-rel_mat[np.eye(rel_mat.shape[0],dtype=bool)]=0
-solution_num=2000
+ebv = ebv[:,2]
+sample_num = ebv.shape[0]
+rel_mat = np.array(pd.read_csv('/home/kingargroo/geneticalgroithm/REL.csv'))
+rel_mat = rel_mat[:, 1::]
+rel_mat[np.eye(rel_mat.shape[0], dtype=bool)] = 0
+solution_num = 2000
 
-class MyProblem(ea.Problem):  # 继承Problem父类
-    def __init__(self,lambd):
-        name = 'MyProblem'  # 初始化name（函数名称，可以随意设置）
-        M = 1  # 初始化M（目标维数）
-        maxormins = [-1]  # 初始化maxormins（目标最小最大化标记列表，1：最小化该目标；-1：最大化该目标）
-        Dim = sample_num  # 初始化Dim（决策变量维数）
-        varTypes = [1] * Dim  # 初始化varTypes（决策变量的类型，元素为0表示对应的变量是连续的；1表示是离散的）
-        lb = [0]*Dim  # 决策变量下界
-        ub = list(group_num)  # 决策变量上界
-        lbin = [1] * Dim  # 决策变量下边界
-        ubin = [1] * Dim  # 决策变量上边界
-        self.lambd=lambd
-        # 调用父类构造方法完成实例化
-        ea.Problem.__init__(self, name, M, maxormins, Dim, varTypes, lb, ub, lbin, ubin)
+# create solover for integer programming
+solver = pywraplp.Solver.CreateSolver('SCIP')
+lambda_list=[0,15,35,60,90,100,150,200,250]
+ebv_list,rel_list=[],[]
+for lambd in lambda_list:
+    R = []
+    var_index = []
+    index_count = 0
+    expression = 0
+    # create decision variable and objective function
+    x = []
 
-    def aimFunc(self, pop):  # 目标函数
-        total = np.zeros((pop.Phen.shape[0], 1))
-        pop.CV = np.zeros((pop.sizes, sample_num))
-        for i in range(pop.Phen.shape[0]):
-            individual = pop.Phen[i, :]
-            effective_index=np.where(individual==1)[0]
-            sub_mat = rel_mat[effective_index][:, effective_index]
-            total[i] = np.mean(ebv[effective_index]) - self.lambd * (np.sum(sub_mat) / (sub_mat.shape[0] ** 2 - sub_mat.shape[0]))
-        #to satisfy constraint
-        for group in unique_group:
-            #find the variable id belong to same group
-            id=np.where(group_num==group)[0]
-            if len(id)<=50:
-                continue
-            else:
-                #find the variable belong to same group
-                x=pop.Phen[:,id]
-                #not choosing more than 50 sample in a group
-                exIDx1=np.where(np.sum(x,axis=1)>50)[0]
-                pop.CV[exIDx1,id]=1
-                # equality constrain ,choosing 2000 sample
-        exIDx2=np.where(np.sum(pop.Phen)==solution_num,axis=1)[0]
-        pop.CV[exIDx2,:]=1
-        pop.ObjV= total
+    for i in range(sample_num - 1):
+        x_i = []
+        R_i = []
+        for j in range(i + 1, sample_num):
+            x_ = solver.IntVar(0, 1, 'x_{}_{}'.format(i, j))
+            x_i.append(x_)
+            rij = (ebv[i] + ebv[j]) / 2 - lambd * rel_mat[i, j]
+            R_i.append(rij)
+            expression += rij * x_
+
+        x.append(x_i)
+        R.append(R_i)
+    print('number of variables=', solver.NumVariables())
+    solver.Maximize(expression)
+
+    # constrain
+    exprx = []
+    for xx in x:
+        for xxx in xx:
+            exprx.append(xxx)
+    solver.Add(solver.Sum(exprx) <= solution_num - 1)
 
 
+    for i in range(len(x)):
+        exprx = 0
+        for ii in x[i]:
+            exprx += ii
+        lower_bound=min(group_num[i],5)
+        upper_bound=group_num[i]
+        solver.Add(exprx <= upper_bound)
+        #solver.Add(exprx>=lower_bound)
 
+    init_i = len(x)
+    for j in range(sample_num):
+        expry = []
+        for i in range(init_i):
+            expry.append(x[i][j])
+        lower_bound = min(group_num[j], 5)
+        upper_bound = group_num[j]
+        solver.Add(solver.Sum(expry) <= upper_bound)
+        #solver.Add(solver.Sum(expry) >= lower_bound)
+        init_i -= 1
 
+    # solve the proble
+    status = solver.Solve()
+    if status == solver.OPTIMAL:
+        print('objective=', solver.Objective().Value())
+        print('problem solved in %f ms' % solver.wall_time())
+        print('problem solved in %d iterations' % solver.iterations())
+        print('problem solved in %d branch-and-bound node' % solver.nodes())
+    else:
+        print('problem have no optimal solution')
 
-populationsize=50
-lamda_list=[0,10,20,40]
-solutions=[]
-objs=[]
-for lambd in lamda_list:
-    problem = MyProblem(lambd=lambd)
-    # 构建算法
-    algorithm = ea.soea_EGA_templet(problem,
-                                    ea.Population(Encoding='RI', NIND=populationsize),
-                                    MAXGEN=200,  # 最大进化代数
-                                    logTras=10)  # 表示每隔多少代记录一次日志信息
-    # 求解
-    res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=False, saveFlag=True, dirname='result')
-    objs.append(res['ObjV'])
-    solutions.append(res['Vars'])
+    solution_index = []
+    rel_total=0
+    ebv_total=0
+    for x_ in x:
+        for x__ in x_:
+            if x__.solution_value() != 0:
+                print(x__.name(), '=', x__.solution_value())
+                x_str = x__.name()
+                split_list = x_str.split('_')
+                i,j=int(split_list[1]),int(split_list[2])
+                solution_index.append(i)
+                solution_index.append(j)
+                rel_total+=rel_mat[i,j]
+                ebv_total+=(ebv[i]+ebv[j])/2
+    from collections import Counter
+    element_counts = dict(Counter(solution_index))
+    print(element_counts)
+    rel_list.append(rel_total/(sample_num**2-sample_num))
+    ebv_list.append(ebv_total/sample_num)
 
-ebv_values=[]
-rel_values=[]
-
-for solution in solutions:
-    ebv_value=np.mean(ebv[solution])
-    solution=solution.ravel()
-    sub_mat = rel_mat[solution][:, solution]
-    rel_value=np.sum(sub_mat)/(sub_mat.shape[0]**2-sub_mat.shape[0])
-    ebv_values.append(ebv_value)
-    rel_values.append(rel_value)
-
-t1=time.time()
-run_time=t1-to
-print(run_time)
-print(ebv_value)
-
-# import matplotlib.pyplot as plt
-# fig,ax1=plt.subplots()
-# plt.plot(lamda_list,ebv_values)
-# ax1.set_xlabel('lambda')
-# ax1.set_ylabel('ebv')
-# ax2=ax1.twinx()
-#
-#
-# ax2.plot(lamda_list,rel_values,'*--')
-# ax2.set_ylabel('relationship')
-# #ax2.ylim((min(rel_values),max(rel_values)))
-# plt.legend(['EBV','relation'])
-# plt.show()
+import matplotlib.pyplot as plt
+fig = plt.figure()
+ax1 = fig.add_subplot(111)
+ax1.plot(lambda_list, ebv_list)
+ax1.set_ylabel(' EBV value')
+ax1.set_xlabel('lambda')
+ax1.set_title("EBV AND RELATIONSHIP selection")
+#ax1.legend(['ebv'])
+ax2 = ax1.twinx()  # this is the important function
+ax2.plot(lambda_list, rel_list, 'r')
+ax2.set_ylabel('RELATIONSHIP VALUE')
+ax2.set_xlabel('lambda')
+#fig.legend(['ebv','rel'])
+plt.show()
